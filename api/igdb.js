@@ -5,9 +5,16 @@ const CLIENT_SECRET  = process.env.IGDB_CLIENT_SECRET;
 const IGDB_BASE      = 'https://api.igdb.com/v4';
 
 // Modern platforms: PC, PS4, PS5, Xbox One, Xbox Series X|S, Switch
+// Stadia (170) intentionally excluded — discontinued
 const MODERN_PLATFORMS = '(6,48,49,130,167,169)';
+
+// category = 0 → main game only (no DLC, bundle, expansion, edition, etc.)
+// version_parent = null → base game only (no Deluxe/Gold/GOTY variants)
+const BASE_GAME_FILTER = 'category = 0 & version_parent = null';
+
 const COMMON_FIELDS = [
   'name', 'cover.image_id',
+  'screenshots.image_id',
   'first_release_date', 'genres.name',
   'rating', 'aggregated_rating', 'aggregated_rating_count', 'rating_count',
   'external_games.uid', 'external_games.category',
@@ -58,21 +65,22 @@ export default async function handler(req, res) {
 
     if (action === 'search') {
       if (!query) return res.status(400).json({ error: 'query required' });
+      // Base games only on modern platforms — no editions, no old-gen exclusives
       const data = await igdbQuery('games',
-        `search "${query}"; fields ${COMMON_FIELDS}; where platforms = ${MODERN_PLATFORMS}; limit ${limit};`);
+        `search "${query}"; fields ${COMMON_FIELDS}; where ${BASE_GAME_FILTER} & platforms = ${MODERN_PLATFORMS}; limit ${limit};`);
       return res.json(data);
     }
 
     if (action === 'trending') {
       const oneYearAgo = Math.floor(Date.now() / 1000) - 365 * 24 * 3600;
       const data = await igdbQuery('games',
-        `fields ${COMMON_FIELDS}; where first_release_date > ${oneYearAgo} & rating_count > 10 & platforms = ${MODERN_PLATFORMS}; sort rating_count desc; limit ${limit};`);
+        `fields ${COMMON_FIELDS}; where ${BASE_GAME_FILTER} & first_release_date > ${oneYearAgo} & rating_count > 10 & platforms = ${MODERN_PLATFORMS}; sort rating_count desc; limit ${limit};`);
       return res.json(data);
     }
 
     if (action === 'popular') {
       const data = await igdbQuery('games',
-        `fields ${COMMON_FIELDS}; where aggregated_rating > 80 & aggregated_rating_count > 10 & rating_count > 50 & platforms = ${MODERN_PLATFORMS}; sort aggregated_rating desc; limit ${limit};`);
+        `fields ${COMMON_FIELDS}; where ${BASE_GAME_FILTER} & aggregated_rating > 80 & aggregated_rating_count > 10 & rating_count > 50 & platforms = ${MODERN_PLATFORMS}; sort aggregated_rating desc; limit ${limit};`);
       return res.json(data);
     }
 
