@@ -58,8 +58,10 @@ export default async function handler(req, res) {
 
     if (action === 'search') {
       if (!query) return res.status(400).json({ error: 'query required' });
+      // version_parent = null → no editions (Deluxe, Gold, etc.)
+      // category != (1,3) → exclude DLC and bundles, but keep games with no category set
       const data = await igdbQuery('games',
-        `search "${query}"; fields ${COMMON_FIELDS}; where platforms = ${MODERN_PLATFORMS} & version_parent = null; limit ${limit};`);
+        `search "${query}"; fields ${COMMON_FIELDS}; where platforms = ${MODERN_PLATFORMS} & version_parent = null & category != (1,3); limit ${limit};`);
       return res.json(data);
     }
 
