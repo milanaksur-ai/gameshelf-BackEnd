@@ -8,9 +8,9 @@ const IGDB_BASE      = 'https://api.igdb.com/v4';
 // Stadia (170) intentionally excluded — discontinued
 const MODERN_PLATFORMS = '(6,48,49,130,167,169)';
 
-// category = 0 → main game only (no DLC, bundle, expansion, edition, etc.)
-// version_parent = null → base game only (no Deluxe/Gold/GOTY variants)
-const BASE_GAME_FILTER = 'category = 0 & version_parent = null';
+// Only main games, remakes and remasters — excludes DLC, bundles, episodes, editions
+// Removing version_parent filter — too restrictive, hides many valid games
+const BASE_GAME_FILTER = 'category = (0,8,9)';
 
 const COMMON_FIELDS = [
   'name', 'cover.image_id',
@@ -65,7 +65,6 @@ export default async function handler(req, res) {
 
     if (action === 'search') {
       if (!query) return res.status(400).json({ error: 'query required' });
-      // Base games only on modern platforms — no editions, no old-gen exclusives
       const data = await igdbQuery('games',
         `search "${query}"; fields ${COMMON_FIELDS}; where ${BASE_GAME_FILTER} & platforms = ${MODERN_PLATFORMS}; limit ${limit};`);
       return res.json(data);
