@@ -59,7 +59,7 @@ export default async function handler(req, res) {
     if (action === 'search') {
       if (!query) return res.status(400).json({ error: 'query required' });
       const data = await igdbQuery('games',
-        `search "${query}"; fields ${COMMON_FIELDS}; where platforms = ${MODERN_PLATFORMS}; limit ${limit};`);
+        `search "${query}"; fields ${COMMON_FIELDS}; where platforms = ${MODERN_PLATFORMS} & version_parent = null; limit ${limit};`);
       return res.json(data);
     }
 
