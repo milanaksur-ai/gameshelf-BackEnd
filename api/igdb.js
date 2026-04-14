@@ -12,6 +12,7 @@ const COMMON_FIELDS = [
   'rating', 'aggregated_rating', 'aggregated_rating_count', 'rating_count',
   'external_games.uid', 'external_games.category',
   'platforms.abbreviation', 'platforms.name',
+  'game_modes', 'multiplayer_modes',
 ].join(',');
 
 let tokenCache = { token: null, expires: 0 };
@@ -54,12 +55,15 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    const { action, query, ids, limit = 12 } = req.body || {};
+    const { action, query, ids, genreId, limit = 12, mode, offset = 0 } = req.body || {};
 
     if (action === 'search') {
       if (!query) return res.status(400).json({ error: 'query required' });
+      const modeFilter = mode === 'solo'  ? ' & (game_modes = null | game_modes = (1,3))'
+                       : mode === 'multi' ? ' & (game_modes = null | game_modes = (2,3,4,5,6))'
+                       : '';
       const data = await igdbQuery('games',
-        `search "${query}"; fields ${COMMON_FIELDS}; where platforms = ${MODERN_PLATFORMS} & version_parent = null; limit ${limit};`);
+        `search "${query}"; fields ${COMMON_FIELDS}; where platforms = ${MODERN_PLATFORMS} & version_parent = null${modeFilter}; limit ${limit};`);
       return res.json(data);
     }
 
@@ -79,6 +83,13 @@ export default async function handler(req, res) {
     if (action === 'game' && ids?.length) {
       const data = await igdbQuery('games',
         `fields ${COMMON_FIELDS}; where id = (${ids.join(',')}); limit ${ids.length};`);
+      return res.json(data);
+    }
+
+    if (action === 'genre') {
+      if (!genreId) return res.status(400).json({ error: 'genreId required' });
+      const data = await igdbQuery('games',
+        `fields ${COMMON_FIELDS}; where genres = (${genreId}) & platforms = ${MODERN_PLATFORMS} & aggregated_rating > 65 & aggregated_rating_count > 5; sort aggregated_rating desc; limit ${limit}; offset ${offset};`);
       return res.json(data);
     }
 
