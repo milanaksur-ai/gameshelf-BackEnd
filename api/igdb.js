@@ -55,7 +55,8 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
   try {
-    const { action, query, ids, genreId, limit = 12, mode, offset = 0 } = req.body || {};
+    const { action, query, ids, genreId, limit = 12, mode, offset = 0,
+            gameId, genreIds, themeIds, yearFrom, yearTo } = req.body || {};
 
     if (action === 'search') {
       if (!query) return res.status(400).json({ error: 'query required' });
@@ -90,6 +91,30 @@ export default async function handler(req, res) {
       if (!genreId) return res.status(400).json({ error: 'genreId required' });
       const data = await igdbQuery('games',
         `fields ${COMMON_FIELDS}; where genres = (${genreId}) & platforms = ${MODERN_PLATFORMS} & aggregated_rating > 65 & aggregated_rating_count > 5; sort aggregated_rating desc; limit ${limit}; offset ${offset};`);
+      return res.json(data);
+    }
+
+    if (action === 'similar') {
+      if (!gameId) return res.status(400).json({ error: 'gameId required' });
+      // Step 1: get the similar_games IDs for this game
+      const gameData = await igdbQuery('games', `fields similar_games; where id = ${gameId}; limit 1;`);
+      const simIds = gameData?.[0]?.similar_games;
+      if (!simIds?.length) return res.json([]);
+      // Step 2: fetch those games with full fields
+      const data = await igdbQuery('games',
+        `fields ${COMMON_FIELDS}; where id = (${simIds.slice(0, limit).join(',')}) & platforms = ${MODERN_PLATFORMS} & cover != null; limit ${limit};`);
+      return res.json(data);
+    }
+
+    if (action === 'filter') {
+      let where = `platforms = ${MODERN_PLATFORMS} & aggregated_rating > 72 & aggregated_rating_count > 5 & cover != null`;
+      if (genreIds?.length) where += ` & genres = (${genreIds.join(',')})`;
+      if (themeIds?.length) where += ` & themes = (${themeIds.join(',')})`;
+      if (yearFrom) where += ` & first_release_date > ${Math.floor(new Date(`${yearFrom}-01-01`).getTime() / 1000)}`;
+      if (yearTo)   where += ` & first_release_date < ${Math.floor(new Date(`${yearTo}-12-31`).getTime() / 1000)}`;
+      const modeFilter = mode === 'multi' ? ` & game_modes = (2,3,4,5,6)` : '';
+      const data = await igdbQuery('games',
+        `fields ${COMMON_FIELDS}; where ${where}${modeFilter}; sort aggregated_rating_count desc; limit ${limit};`);
       return res.json(data);
     }
 
