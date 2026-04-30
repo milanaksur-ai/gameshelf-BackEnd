@@ -4,7 +4,6 @@ const CLIENT_ID      = process.env.IGDB_CLIENT_ID;
 const CLIENT_SECRET  = process.env.IGDB_CLIENT_SECRET;
 const IGDB_BASE      = 'https://api.igdb.com/v4';
 
-// Modern platforms: PC, PS4, PS5, Xbox One, Xbox Series X|S, Switch
 const MODERN_PLATFORMS = '(6,48,49,130,167,169)';
 const COMMON_FIELDS = [
   'name', 'cover.image_id',
@@ -13,6 +12,7 @@ const COMMON_FIELDS = [
   'external_games.uid', 'external_games.category',
   'platforms.abbreviation', 'platforms.name',
   'game_modes', 'multiplayer_modes',
+  'videos',
 ].join(',');
 
 let tokenCache = { token: null, expires: 0 };
@@ -96,11 +96,9 @@ export default async function handler(req, res) {
 
     if (action === 'similar') {
       if (!gameId) return res.status(400).json({ error: 'gameId required' });
-      // Step 1: get the similar_games IDs for this game
       const gameData = await igdbQuery('games', `fields similar_games; where id = ${gameId}; limit 1;`);
       const simIds = gameData?.[0]?.similar_games;
       if (!simIds?.length) return res.json([]);
-      // Step 2: fetch those games with full fields
       const data = await igdbQuery('games',
         `fields ${COMMON_FIELDS}; where id = (${simIds.slice(0, limit).join(',')}) & platforms = ${MODERN_PLATFORMS} & cover != null; limit ${limit};`);
       return res.json(data);
