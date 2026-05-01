@@ -53,11 +53,13 @@ export default async function handler(req, res) {
 
     if (action === 'search') {
       if (!query) return res.status(400).json({ error: 'query required' });
+      // Minimal filters: let IGDB relevance ranking do its job.
+      // Platform and version filters were causing false negatives (e.g. "witcher" returned nothing).
+      // Client-side dedup (dedupByTitle + DLC_RE) handles edition cleanup.
       const modeFilter = mode === 'solo'  ? ' & (game_modes = null | game_modes = (1,3))'
                        : mode === 'multi' ? ' & (game_modes = null | game_modes = (2,3,4,5,6))' : '';
-      // category: exclude DLC (1) and expansions (2) only — keep remasters, bundles, ports
       const data = await igdbQuery('games',
-        `search "${query}"; fields ${COMMON_FIELDS}; where platforms = ${MODERN_PLATFORMS} & version_parent = null & category != (1,2)${modeFilter}; limit ${limit};`);
+        `search "${query}"; fields ${COMMON_FIELDS}; where cover != null${modeFilter}; limit ${limit};`);
       return res.json(data);
     }
 
