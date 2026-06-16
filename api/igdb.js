@@ -15,6 +15,16 @@ const COMMON_FIELDS = [
   'videos.video_id', 'videos.name',
 ].join(',');
 
+// Extra fields requested only for the detail view (action: 'game') to keep
+// grid/search payloads lean. franchise, dev/publisher, age rating (PEGI/ESRB).
+const DETAIL_EXTRA = [
+  'franchises.name',
+  'involved_companies.company.name',
+  'involved_companies.developer',
+  'involved_companies.publisher',
+  'age_ratings.category', 'age_ratings.rating',
+].join(',');
+
 let tokenCache = { token: null, expires: 0 };
 
 async function getToken() {
@@ -78,7 +88,15 @@ export default async function handler(req, res) {
 
     if (action === 'game' && ids?.length) {
       const data = await igdbQuery('games',
-        `fields ${COMMON_FIELDS}; where id = (${ids.join(',')}); limit ${ids.length};`);
+        `fields ${COMMON_FIELDS},${DETAIL_EXTRA}; where id = (${ids.join(',')}); limit ${ids.length};`);
+      // Enrich with How Long To Beat (separate endpoint, keyed by game_id, seconds).
+      try {
+        const ttb = await igdbQuery('game_time_to_beat',
+          `fields game_id,hastily,normally,completely; where game_id = (${ids.join(',')}); limit ${ids.length};`);
+        const ttbMap = {};
+        for (const t of ttb || []) ttbMap[t.game_id] = t;
+        for (const g of data) if (ttbMap[g.id]) g.game_time_to_beat = ttbMap[g.id];
+      } catch (e) { /* time-to-beat is optional, ignore failures */ }
       return res.json(data);
     }
 
