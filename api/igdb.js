@@ -15,16 +15,6 @@ const COMMON_FIELDS = [
   'videos.video_id', 'videos.name',
 ].join(',');
 
-// Extra fields requested only for the detail view (action: 'game') to keep
-// grid/search payloads lean. franchise, dev/publisher, age rating (PEGI/ESRB).
-const DETAIL_EXTRA = [
-  'franchises.name',
-  'involved_companies.company.name',
-  'involved_companies.developer',
-  'involved_companies.publisher',
-  'age_ratings.category', 'age_ratings.rating',
-].join(',');
-
 let tokenCache = { token: null, expires: 0 };
 
 async function getToken() {
@@ -87,16 +77,32 @@ export default async function handler(req, res) {
     }
 
     if (action === 'game' && ids?.length) {
+      const idList = ids.join(',');
+      // Core detail query — only stable, long-standing fields so it can't be
+      // broken by a single deprecated field. franchises + involved_companies
+      // have been stable for years.
       const data = await igdbQuery('games',
-        `fields ${COMMON_FIELDS},${DETAIL_EXTRA}; where id = (${ids.join(',')}); limit ${ids.length};`);
-      // Enrich with How Long To Beat (separate endpoint, keyed by game_id, seconds).
+        `fields ${COMMON_FIELDS},franchises.name,involved_companies.company.name,involved_companies.developer,involved_companies.publisher; where id = (${idList}); limit ${ids.length};`);
+
+      // Age ratings — the legacy category/rating enums could be deprecated on
+      // newer API versions and would 500 the whole query, so fetch in isolation.
+      try {
+        const ar = await igdbQuery('games',
+          `fields age_ratings.category,age_ratings.rating; where id = (${idList}); limit ${ids.length};`);
+        const arMap = {};
+        for (const a of ar || []) if (a.age_ratings) arMap[a.id] = a.age_ratings;
+        for (const g of data) if (arMap[g.id]) g.age_ratings = arMap[g.id];
+      } catch (e) { /* age rating unavailable, ignore */ }
+
+      // How Long To Beat (separate endpoint, keyed by game_id, values in seconds).
       try {
         const ttb = await igdbQuery('game_time_to_beat',
-          `fields game_id,hastily,normally,completely; where game_id = (${ids.join(',')}); limit ${ids.length};`);
+          `fields game_id,hastily,normally,completely; where game_id = (${idList}); limit ${ids.length};`);
         const ttbMap = {};
         for (const t of ttb || []) ttbMap[t.game_id] = t;
         for (const g of data) if (ttbMap[g.id]) g.game_time_to_beat = ttbMap[g.id];
       } catch (e) { /* time-to-beat is optional, ignore failures */ }
+
       return res.json(data);
     }
 
