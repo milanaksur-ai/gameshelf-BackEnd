@@ -104,13 +104,16 @@ export default async function handler(req, res) {
       }
 
       // How Long To Beat (separate endpoint, keyed by game_id, values in seconds).
+      let ttbDebug = null;
       try {
         const ttb = await igdbQuery('game_time_to_beat',
           `fields game_id,hastily,normally,completely; where game_id = (${idList}); limit ${ids.length};`);
+        ttbDebug = { ok: true, count: (ttb || []).length, sample: (ttb || [])[0] || null };
         const ttbMap = {};
         for (const t of ttb || []) ttbMap[t.game_id] = t;
         for (const g of data) if (ttbMap[g.id]) g.game_time_to_beat = ttbMap[g.id];
-      } catch (e) { /* time-to-beat is optional, ignore failures */ }
+      } catch (e) { ttbDebug = { ok: false, error: String(e.message || e) }; }
+      if (data[0]) data[0]._ttbDebug = ttbDebug;
 
       return res.json(data);
     }
