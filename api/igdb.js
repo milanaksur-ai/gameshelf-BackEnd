@@ -84,15 +84,24 @@ export default async function handler(req, res) {
       const data = await igdbQuery('games',
         `fields ${COMMON_FIELDS},franchises.name,involved_companies.company.name,involved_companies.developer,involved_companies.publisher; where id = (${idList}); limit ${ids.length};`);
 
-      // Age ratings — the legacy category/rating enums could be deprecated on
-      // newer API versions and would 500 the whole query, so fetch in isolation.
+      // Age ratings — fetched in isolation so a schema mismatch can't 500 the
+      // whole detail query. Try the current model (organization + rating_category)
+      // first, then fall back to the legacy category/rating enums.
       try {
         const ar = await igdbQuery('games',
-          `fields age_ratings.category,age_ratings.rating; where id = (${idList}); limit ${ids.length};`);
+          `fields age_ratings.organization.name,age_ratings.rating_category.rating; where id = (${idList}); limit ${ids.length};`);
         const arMap = {};
         for (const a of ar || []) if (a.age_ratings) arMap[a.id] = a.age_ratings;
         for (const g of data) if (arMap[g.id]) g.age_ratings = arMap[g.id];
-      } catch (e) { /* age rating unavailable, ignore */ }
+      } catch (e) {
+        try {
+          const ar = await igdbQuery('games',
+            `fields age_ratings.category,age_ratings.rating; where id = (${idList}); limit ${ids.length};`);
+          const arMap = {};
+          for (const a of ar || []) if (a.age_ratings) arMap[a.id] = a.age_ratings;
+          for (const g of data) if (arMap[g.id]) g.age_ratings = arMap[g.id];
+        } catch (_) { /* age rating unavailable, ignore */ }
+      }
 
       // How Long To Beat (separate endpoint, keyed by game_id, values in seconds).
       try {
