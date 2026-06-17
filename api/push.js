@@ -65,7 +65,7 @@ export default async function handler(req, res) {
     if (!uRes.ok) return res.status(401).json({ error: 'Invalid token' });
     const caller = await uRes.json();
 
-    const { type, to } = req.body || {};
+    const { type, to, quizName, challengeId } = req.body || {};
     if (!type || !to) return res.status(400).json({ error: 'type and to required' });
 
     // Only allow notifying users linked to the caller by a friendship row
@@ -77,14 +77,17 @@ export default async function handler(req, res) {
     const profs = await sbFetch(`profiles?id=eq.${caller.id}&select=username`);
     const name = profs?.[0]?.username || 'Un joueur';
 
+    const notifUrl = challengeId ? `/?challenge=${challengeId}` : '/';
     const MESSAGES = {
-      friend_request: { title: 'GameShelf', body: `🤝 ${name} t'a envoyé une demande d'ami !` },
-      friend_accept:  { title: 'GameShelf', body: `🎉 ${name} a accepté ta demande d'ami !` }
+      friend_request:       { title: 'GameShelf', body: `🤝 ${name} t'a envoyé une demande d'ami !`, url: '/' },
+      friend_accept:        { title: 'GameShelf', body: `🎉 ${name} a accepté ta demande d'ami !`, url: '/' },
+      quiz_challenge:       { title: 'GameShelf', body: `⚡ ${name} te défie au quiz "${quizName || 'Quiz'}" !`, url: notifUrl },
+      quiz_result:          { title: 'GameShelf', body: `🏆 ${name} a répondu ! Vois qui a gagné`, url: notifUrl },
     };
     const msg = MESSAGES[type];
     if (!msg) return res.status(400).json({ error: 'Unknown type' });
 
-    const sent = await sendToUser(to, { ...msg, url: '/' });
+    const sent = await sendToUser(to, msg);
     return res.status(200).json({ sent });
   } catch (e) {
     console.error('push error', e);
