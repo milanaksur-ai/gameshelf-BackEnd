@@ -106,7 +106,7 @@ export default async function handler(req, res) {
       // How Long To Beat (separate endpoint, keyed by game_id, values in seconds).
       let ttbDebug = null;
       try {
-        const ttb = await igdbQuery('game_time_to_beat',
+        const ttb = await igdbQuery('game_time_to_beats',
           `fields game_id,hastily,normally,completely; where game_id = (${idList}); limit ${ids.length};`);
         ttbDebug = { ok: true, count: (ttb || []).length, sample: (ttb || [])[0] || null };
         const ttbMap = {};
