@@ -72,3 +72,10 @@ ALTER TABLE profiles ADD COLUMN IF NOT EXISTS xp INTEGER NOT NULL DEFAULT 0;
 DROP POLICY IF EXISTS "profiles_update_own_xp" ON profiles;
 CREATE POLICY "profiles_update_own_xp" ON profiles FOR UPDATE
   USING (auth.uid() = id);
+
+
+-- ── 4. ACHIEVEMENTS COLUMN ON PROFILES ───────────────────────────────────────
+-- Stores unlocked achievement IDs as a JSON array.
+-- Public read so friends can see each other's achievements (competitive).
+
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS achievements JSONB NOT NULL DEFAULT '[]';
