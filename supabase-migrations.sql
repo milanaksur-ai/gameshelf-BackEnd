@@ -79,3 +79,11 @@ CREATE POLICY "profiles_update_own_xp" ON profiles FOR UPDATE
 -- Public read so friends can see each other's achievements (competitive).
 
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS achievements JSONB NOT NULL DEFAULT '[]';
+
+
+-- ── 5. XP_BACKFILLED FLAG ON PROFILES ────────────────────────────────────────
+-- Cross-device guard: once the retroactive XP backfill has run for a user,
+-- this is set to TRUE in Supabase. Any other device loading the profile sees
+-- this flag and skips the backfill entirely, preventing double XP.
+
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS xp_backfilled BOOLEAN NOT NULL DEFAULT FALSE;
