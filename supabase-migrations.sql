@@ -59,3 +59,16 @@ CREATE POLICY "qc_update_participants" ON quiz_challenges FOR UPDATE
 -- Indexes for notification queries
 CREATE INDEX IF NOT EXISTS qc_challenged_idx ON quiz_challenges (challenged_id, status);
 CREATE INDEX IF NOT EXISTS qc_challenger_idx ON quiz_challenges (challenger_id, status);
+
+
+-- ── 3. XP COLUMN ON PROFILES ──────────────────────────────────────────────────
+-- Tracks accumulated XP for the leveling system.
+-- Public read so friends can see each other's rank.
+
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS xp INTEGER NOT NULL DEFAULT 0;
+
+-- Allow anyone to read xp (profiles already have public select policy)
+-- Allow users to update their own xp only
+DROP POLICY IF EXISTS "profiles_update_own_xp" ON profiles;
+CREATE POLICY "profiles_update_own_xp" ON profiles FOR UPDATE
+  USING (auth.uid() = id);
