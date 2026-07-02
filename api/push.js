@@ -79,7 +79,11 @@ export default async function handler(req, res) {
 
     const MESSAGES = {
       friend_request: { title: 'GameShelf', body: `🤝 ${name} t'a envoyé une demande d'ami !` },
-      friend_accept:  { title: 'GameShelf', body: `🎉 ${name} a accepté ta demande d'ami !` }
+      friend_accept:  { title: 'GameShelf', body: `🎉 ${name} a accepté ta demande d'ami !` },
+      quiz_result:    { title: 'GameShelf', body: `⚡ ${name} a répondu à ton défi quiz — viens voir le résultat !` },
+      // tag 'quiz-daily' : plusieurs amis qui jouent le même jour remplacent
+      // la notification au lieu de l'empiler (max 1 visible par jour)
+      quiz_daily:     { title: 'GameShelf', body: `🧠 ${name} a lancé les quiz du jour — à toi de jouer !`, tag: 'quiz-daily' }
     };
     const msg = MESSAGES[type];
     if (!msg) return res.status(400).json({ error: 'Unknown type' });
