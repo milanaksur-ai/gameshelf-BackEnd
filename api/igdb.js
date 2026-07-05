@@ -63,6 +63,15 @@ export default async function handler(req, res) {
       return res.json(data);
     }
 
+    if (action === 'upcoming') {
+      // Sorties à venir les plus attendues (6 prochains mois, triées par hype)
+      const now = Math.floor(Date.now() / 1000);
+      const horizon = now + 183 * 24 * 3600;
+      const data = await igdbQuery('games',
+        `fields ${COMMON_FIELDS},hypes; where first_release_date > ${now} & first_release_date < ${horizon} & platforms = ${MODERN_PLATFORMS} & cover != null & hypes > 4; sort hypes desc; limit ${limit};`);
+      return res.json(data);
+    }
+
     if (action === 'trending') {
       const oneYearAgo = Math.floor(Date.now() / 1000) - 365 * 24 * 3600;
       const data = await igdbQuery('games',
