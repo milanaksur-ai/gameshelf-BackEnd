@@ -1,6 +1,17 @@
 {
   "version": 2,
   "crons": [
-    { "path": "/api/cron-weekly", "schedule": "0 18 * * 0" }
+    {
+      "path": "/api/cron-weekly",
+      "schedule": "0 18 * * 0"
+    },
+    {
+      "path": "/api/cron-wishlist",
+      "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/cron-streak",
+      "schedule": "0 18 * * *"
+    }
   ]
 }
