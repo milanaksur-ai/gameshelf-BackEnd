@@ -79,10 +79,13 @@ export default async function handler(req, res) {
 
     const notifUrl = challengeId ? `/?challenge=${challengeId}` : '/';
     const MESSAGES = {
-      friend_request:       { title: 'GameShelf', body: `🤝 ${name} t'a envoyé une demande d'ami !`, url: '/' },
-      friend_accept:        { title: 'GameShelf', body: `🎉 ${name} a accepté ta demande d'ami !`, url: '/' },
-      quiz_challenge:       { title: 'GameShelf', body: `⚡ ${name} te défie au quiz "${quizName || 'Quiz'}" !`, url: notifUrl },
-      quiz_result:          { title: 'GameShelf', body: `🏆 ${name} a répondu ! Vois qui a gagné`, url: notifUrl },
+      friend_request: { title: 'GameShelf', body: `🤝 ${name} t'a envoyé une demande d'ami !`, url: '/' },
+      friend_accept:  { title: 'GameShelf', body: `🎉 ${name} a accepté ta demande d'ami !`, url: '/' },
+      quiz_challenge: { title: 'GameShelf', body: `⚡ ${name} te défie au quiz "${quizName || 'Quiz'}" !`, url: notifUrl },
+      quiz_result:    { title: 'GameShelf', body: `🏆 ${name} a répondu ! Vois qui a gagné`, url: notifUrl },
+      // tag 'quiz-daily' : plusieurs amis qui jouent le même jour remplacent
+      // la notification au lieu de l'empiler (max 1 visible par jour)
+      quiz_daily:     { title: 'GameShelf', body: `🧠 ${name} a lancé les quiz du jour — à toi de jouer !`, tag: 'quiz-daily', url: '/' },
     };
     const msg = MESSAGES[type];
     if (!msg) return res.status(400).json({ error: 'Unknown type' });
