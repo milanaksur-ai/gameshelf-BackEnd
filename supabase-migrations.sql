@@ -213,3 +213,42 @@ CREATE POLICY "tier_lists_read_by_visibility" ON tier_lists FOR SELECT USING (
 -- Les lignes INSERT / UPDATE / DELETE / ALL sont à me transmettre pour relecture.
 SELECT policyname, cmd, qual, with_check FROM pg_policies
  WHERE schemaname = 'public' AND tablename = 'tier_lists' ORDER BY cmd;
+
+-- ── 8. ÉCRITURE DES TIER LISTS : propriétaire uniquement ────────────────────
+-- État constaté en prod avant cette section :
+--   "Public update"  UPDATE USING (true)        → n'importe qui (même anonyme)
+--                    pouvait modifier, rendre publique ou s'approprier
+--                    (user_id) n'importe quelle tier list ;
+--   "Public insert"  INSERT WITH CHECK (true)   → création au nom d'un autre ;
+--   "tl_delete_own"  DELETE … OR user_id IS NULL → suppression par n'importe qui
+--                    des anciennes listes sans propriétaire.
+-- Remplace toutes les policies d'écriture (INSERT / UPDATE / DELETE / ALL).
+-- Les anciennes listes sans user_id restent revendicables par un utilisateur
+-- connecté (UPDATE … SET user_id = soi), ce que fait l'app au chargement.
+-- Idempotent.
+
+DO $$
+DECLARE p RECORD;
+BEGIN
+  FOR p IN SELECT policyname FROM pg_policies
+            WHERE schemaname = 'public' AND tablename = 'tier_lists'
+              AND cmd IN ('INSERT', 'UPDATE', 'DELETE', 'ALL')
+  LOOP
+    EXECUTE format('DROP POLICY %I ON public.tier_lists', p.policyname);
+  END LOOP;
+END $$;
+
+CREATE POLICY "tier_lists_insert_own" ON tier_lists FOR INSERT
+  WITH CHECK (auth.uid() IS NOT NULL AND user_id = auth.uid());
+
+CREATE POLICY "tier_lists_update_own" ON tier_lists FOR UPDATE
+  USING      (user_id = auth.uid() OR (user_id IS NULL AND auth.uid() IS NOT NULL))
+  WITH CHECK (user_id = auth.uid());
+
+CREATE POLICY "tier_lists_delete_own" ON tier_lists FOR DELETE
+  USING (user_id = auth.uid());
+
+-- Vérification : toutes les policies des deux tables.
+SELECT tablename, policyname, cmd, qual, with_check FROM pg_policies
+ WHERE schemaname = 'public' AND tablename IN ('tier_lists', 'collections')
+ ORDER BY tablename, cmd;
