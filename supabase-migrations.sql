@@ -166,3 +166,50 @@ CREATE INDEX IF NOT EXISTS friendships_pair_idx ON friendships (requester_id, ad
 -- Une policy "ALL" en USING (true) annulerait tout : la signaler si présente.
 SELECT policyname, cmd, qual FROM pg_policies
  WHERE schemaname = 'public' AND tablename = 'collections' ORDER BY cmd;
+
+-- ── 7. VISIBILITÉ DES TIER LISTS : public / amis / privé ────────────────────
+-- Même principe que la section 6 (collections). Prérequis : section 6 lancée
+-- (fonction is_friend_of). Idempotent.
+-- Cas particulier : d'anciennes listes ont été créées sans user_id. L'app les
+-- « revendique » au chargement (UPDATE … WHERE user_id IS NULL), ce qui exige
+-- qu'elles restent lisibles : elles le sont tant qu'elles n'ont pas de
+-- propriétaire, puis suivent leur visibilité une fois revendiquées.
+
+ALTER TABLE tier_lists ADD COLUMN IF NOT EXISTS is_public  BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE tier_lists ADD COLUMN IF NOT EXISTS visibility TEXT;
+UPDATE tier_lists
+   SET visibility = CASE WHEN is_public = FALSE THEN 'private' ELSE 'public' END
+ WHERE visibility IS NULL;
+ALTER TABLE tier_lists ALTER COLUMN visibility SET DEFAULT 'public';
+ALTER TABLE tier_lists ALTER COLUMN visibility SET NOT NULL;
+ALTER TABLE tier_lists DROP CONSTRAINT IF EXISTS tier_lists_visibility_check;
+ALTER TABLE tier_lists ADD CONSTRAINT tier_lists_visibility_check
+  CHECK (visibility IN ('public', 'friends', 'private'));
+
+-- Même fonction de synchro is_public ↔ visibility que pour les collections
+DROP TRIGGER IF EXISTS tier_lists_sync_visibility ON tier_lists;
+CREATE TRIGGER tier_lists_sync_visibility
+  BEFORE INSERT OR UPDATE ON tier_lists
+  FOR EACH ROW EXECUTE FUNCTION collections_sync_visibility();
+
+DO $$
+DECLARE p RECORD;
+BEGIN
+  FOR p IN SELECT policyname FROM pg_policies
+            WHERE schemaname = 'public' AND tablename = 'tier_lists' AND cmd = 'SELECT'
+  LOOP
+    EXECUTE format('DROP POLICY %I ON public.tier_lists', p.policyname);
+  END LOOP;
+END $$;
+
+CREATE POLICY "tier_lists_read_by_visibility" ON tier_lists FOR SELECT USING (
+     user_id = auth.uid()
+  OR user_id IS NULL
+  OR visibility = 'public'
+  OR (visibility = 'friends' AND public.is_friend_of(user_id))
+);
+
+-- Vérification : une seule ligne SELECT (tier_lists_read_by_visibility).
+-- Les lignes INSERT / UPDATE / DELETE / ALL sont à me transmettre pour relecture.
+SELECT policyname, cmd, qual, with_check FROM pg_policies
+ WHERE schemaname = 'public' AND tablename = 'tier_lists' ORDER BY cmd;
