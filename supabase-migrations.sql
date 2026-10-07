@@ -87,3 +87,82 @@ ALTER TABLE profiles ADD COLUMN IF NOT EXISTS achievements JSONB NOT NULL DEFAUL
 -- this flag and skips the backfill entirely, preventing double XP.
 
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS xp_backfilled BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- ── 6. VISIBILITÉ DES COLLECTIONS : public / amis / privé ───────────────────
+-- Avant : policy "collections_read_all" USING (true) → toute collection, même
+-- marquée privée, était lisible par n'importe qui avec la clé publique ; le 🔒
+-- n'était qu'un filtre d'affichage. Ici le contrôle se fait dans la base.
+-- Idempotent : peut être relancé sans risque.
+
+ALTER TABLE collections ADD COLUMN IF NOT EXISTS is_public  BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE collections ADD COLUMN IF NOT EXISTS visibility TEXT;
+UPDATE collections
+   SET visibility = CASE WHEN is_public = FALSE THEN 'private' ELSE 'public' END
+ WHERE visibility IS NULL;
+ALTER TABLE collections ALTER COLUMN visibility SET DEFAULT 'public';
+ALTER TABLE collections ALTER COLUMN visibility SET NOT NULL;
+ALTER TABLE collections DROP CONSTRAINT IF EXISTS collections_visibility_check;
+ALTER TABLE collections ADD CONSTRAINT collections_visibility_check
+  CHECK (visibility IN ('public', 'friends', 'private'));
+
+-- Garde is_public cohérent (= « pas privée ») pour les anciennes versions de
+-- l'app qui n'écrivent que is_public : un passage en privé depuis un vieux
+-- client met bien visibility à 'private'.
+CREATE OR REPLACE FUNCTION collections_sync_visibility() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    IF NEW.is_public = FALSE THEN NEW.visibility := 'private'; END IF;
+  ELSIF NEW.visibility IS NOT DISTINCT FROM OLD.visibility
+    AND NEW.is_public IS DISTINCT FROM OLD.is_public THEN
+    NEW.visibility := CASE WHEN NEW.is_public THEN 'public' ELSE 'private' END;
+  END IF;
+  NEW.is_public := NEW.visibility <> 'private';
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS collections_sync_visibility ON collections;
+CREATE TRIGGER collections_sync_visibility
+  BEFORE INSERT OR UPDATE ON collections
+  FOR EACH ROW EXECUTE FUNCTION collections_sync_visibility();
+
+-- L'utilisateur connecté est-il ami (accepté) avec `other` ?
+-- SECURITY DEFINER : ne dépend pas des policies de friendships. Ne prend qu'un
+-- argument (l'autre est auth.uid()) pour ne pas permettre de tester l'amitié
+-- entre deux inconnus via RPC.
+CREATE OR REPLACE FUNCTION public.is_friend_of(other UUID) RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT auth.uid() IS NOT NULL AND EXISTS (
+    SELECT 1 FROM friendships f
+     WHERE f.status = 'accepted'
+       AND ((f.requester_id = auth.uid() AND f.addressee_id = other)
+         OR (f.addressee_id = auth.uid() AND f.requester_id = other))
+  );
+$$;
+REVOKE ALL ON FUNCTION public.is_friend_of(UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.is_friend_of(UUID) TO anon, authenticated;
+
+-- Remplace TOUTES les policies de lecture existantes (y compris celles créées
+-- à la main dans le dashboard) : une seule policy permissive USING (true)
+-- restante suffirait à tout rendre lisible.
+DO $$
+DECLARE p RECORD;
+BEGIN
+  FOR p IN SELECT policyname FROM pg_policies
+            WHERE schemaname = 'public' AND tablename = 'collections' AND cmd = 'SELECT'
+  LOOP
+    EXECUTE format('DROP POLICY %I ON public.collections', p.policyname);
+  END LOOP;
+END $$;
+
+CREATE POLICY "collections_read_by_visibility" ON collections FOR SELECT USING (
+     user_id = auth.uid()
+  OR visibility = 'public'
+  OR (visibility = 'friends' AND public.is_friend_of(user_id))
+);
+
+CREATE INDEX IF NOT EXISTS friendships_pair_idx ON friendships (requester_id, addressee_id) WHERE status = 'accepted';
+
+-- Vérification : doit lister une seule ligne SELECT (collections_read_by_visibility).
+-- Une policy "ALL" en USING (true) annulerait tout : la signaler si présente.
+SELECT policyname, cmd, qual FROM pg_policies
+ WHERE schemaname = 'public' AND tablename = 'collections' ORDER BY cmd;
