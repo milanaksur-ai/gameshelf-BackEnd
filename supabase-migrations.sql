@@ -252,3 +252,9 @@ CREATE POLICY "tier_lists_delete_own" ON tier_lists FOR DELETE
 SELECT tablename, policyname, cmd, qual, with_check FROM pg_policies
  WHERE schemaname = 'public' AND tablename IN ('tier_lists', 'collections')
  ORDER BY tablename, cmd;
+
+-- ── 9. ORDRE DU TOP (départage des jeux de même note) ───────────────────────
+-- Liste d'ids de jeux dans l'ordre choisi par le joueur. Sert uniquement à
+-- départager les égalités de note (Top 6 du profil, Top 20, vues des amis).
+-- Lisible avec le profil, modifiable via la policy UPDATE existante des profils.
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS top_order JSONB NOT NULL DEFAULT '[]'::jsonb;
