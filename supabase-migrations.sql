@@ -301,3 +301,31 @@ SELECT 'profiles' AS t, id::text, username FROM profiles
 UNION ALL
 SELECT 'user_games', user_id::text || ' / ' || game_id, title FROM user_games
  WHERE game_id !~ '^[A-Za-z0-9_:.-]{1,100}$' OR (image_id IS NOT NULL AND image_id !~ '^[A-Za-z0-9_-]{0,64}$');
+
+-- ── 11. COMPTE PRIVÉ : RÈGLE UNIQUE DE CONFIDENTIALITÉ ─────────────────────
+-- Un compte privé ne montre jamais rien au public : ses collections et tier
+-- lists « Public » ne sont visibles que de ses amis (et n'apparaissent plus dans
+-- « Découvre la communauté »). « Amis » et « Privé » sont inchangés.
+-- Prérequis : sections 6 et 7. Idempotent.
+
+CREATE OR REPLACE FUNCTION public.profile_is_public(uid UUID) RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE((SELECT is_public FROM profiles WHERE id = uid), TRUE);
+$$;
+REVOKE ALL ON FUNCTION public.profile_is_public(UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.profile_is_public(UUID) TO anon, authenticated;
+
+DROP POLICY IF EXISTS "collections_read_by_visibility" ON collections;
+CREATE POLICY "collections_read_by_visibility" ON collections FOR SELECT USING (
+     user_id = auth.uid()
+  OR (visibility = 'public' AND public.profile_is_public(user_id))
+  OR (visibility IN ('public', 'friends') AND public.is_friend_of(user_id))
+);
+
+DROP POLICY IF EXISTS "tier_lists_read_by_visibility" ON tier_lists;
+CREATE POLICY "tier_lists_read_by_visibility" ON tier_lists FOR SELECT USING (
+     user_id = auth.uid()
+  OR user_id IS NULL
+  OR (visibility = 'public' AND public.profile_is_public(user_id))
+  OR (visibility IN ('public', 'friends') AND public.is_friend_of(user_id))
+);
