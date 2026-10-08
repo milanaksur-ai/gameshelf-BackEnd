@@ -10,7 +10,9 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
   try {
-    const rows = await sbFetch('gamepass_catalog?id=eq.1&select=games,new_games,leaving,updated_at');
+    // Si la colonne « leaving » n'existe pas encore (migration non lancée), on sert quand même le catalogue
+    const rows = await sbFetch('gamepass_catalog?id=eq.1&select=games,new_games,leaving,updated_at')
+      .catch(() => sbFetch('gamepass_catalog?id=eq.1&select=games,new_games,updated_at'));
     const row = rows?.[0];
     if (!row) return res.status(404).json({ error: 'Catalog not ready' });
     res.setHeader('Cache-Control', 'public, s-maxage=3600, stale-while-revalidate=86400');

@@ -105,13 +105,22 @@ export default async function handler(req, res) {
     try { leaving = await buildLeaving(games); } catch (e) { console.warn('leaving list unavailable', e.message); }
     const row = { id: 1, games, new_games: newGames, updated_at: new Date().toISOString() };
     if (leaving) row.leaving = leaving; // en cas d'échec, on garde la liste précédente
-    await sbFetch('gamepass_catalog?on_conflict=id', {
+    const write = r => sbFetch('gamepass_catalog?on_conflict=id', {
       method: 'POST',
       headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-      body: JSON.stringify(row),
+      body: JSON.stringify(r),
     });
+    let leavingStatus = leaving ? leaving.length : 'indisponible';
+    try { await write(row); }
+    catch (e) {
+      if (!row.leaving) throw e;
+      // Colonne « leaving » absente (migration section 15 non lancée) : on écrit au moins le catalogue
+      delete row.leaving;
+      await write(row);
+      leavingStatus = 'colonne manquante — lancer la section 15';
+    }
     return res.status(200).json({ games: games.length, fresh: freshCount, newGames: newGames.length,
-                                  leaving: leaving ? leaving.length : 'indisponible' });
+                                  leaving: leavingStatus });
   } catch (e) {
     console.error('cron-gamepass error', e);
     return res.status(500).json({ error: e.message });
