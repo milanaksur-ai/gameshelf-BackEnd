@@ -40,16 +40,64 @@ async function igdbQuery(endpoint, body) {
   return res.json();
 }
 
+// ── Contrôle d'accès ──────────────────────────────────────────────────────────
+// Joueur connecté (jeton Supabase vérifié, mis en cache 10 min) : pas de limite
+// stricte. Sans jeton (pages partagées ouvertes par un visiteur) : 40 requêtes
+// par minute et par IP, au mieux par instance. Évite qu'un script vide le quota.
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SERVICE_KEY  = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const validTokens = new Map();   // jeton → expiration
+const anonHits    = new Map();   // ip → [timestamps]
+async function isValidUser(token) {
+  if (!token || !SUPABASE_URL || !SERVICE_KEY) return false;
+  const exp = validTokens.get(token);
+  if (exp && exp > Date.now()) return true;
+  try {
+    const r = await fetch(`${SUPABASE_URL}/auth/v1/user`, { headers: { apikey: SERVICE_KEY, Authorization: `Bearer ${token}` } });
+    if (!r.ok) return false;
+    if (validTokens.size > 5000) validTokens.clear();
+    validTokens.set(token, Date.now() + 10 * 60_000);
+    return true;
+  } catch (e) { return false; }
+}
+function anonAllowed(ip) {
+  const now = Date.now();
+  const list = (anonHits.get(ip) || []).filter(t => t > now - 60_000);
+  list.push(now);
+  if (anonHits.size > 10000) anonHits.clear();
+  anonHits.set(ip, list);
+  return list.length <= 40;
+}
+const toInt = v => { const n = parseInt(v, 10); return Number.isFinite(n) ? n : null; };
+const toIntList = a => (Array.isArray(a) ? a : []).map(toInt).filter(n => n !== null).slice(0, 100);
+
 export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Origin', ALLOWED_ORIGIN);
   res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!(await isValidUser(token))) {
+    const ip = String(req.headers['x-forwarded-for'] || req.socket?.remoteAddress || 'unknown').split(',')[0].trim();
+    if (!anonAllowed(ip)) return res.status(429).json({ error: 'Too many requests' });
+  }
+
   try {
-    const { action, query, ids, genreId, limit = 12, mode, offset = 0,
-            gameId, genreIds, themeIds, yearFrom, yearTo } = req.body || {};
+    const body = req.body || {};
+    const { action, mode } = body;
+    // Chaque paramètre est ramené à son type avant d'entrer dans une requête IGDB
+    const query    = String(body.query || '').replace(/["\\;]/g, ' ').slice(0, 100).trim();
+    const ids      = toIntList(body.ids);
+    const genreIds = toIntList(body.genreIds);
+    const themeIds = toIntList(body.themeIds);
+    const genreId  = toInt(body.genreId);
+    const gameId   = toInt(body.gameId);
+    const limit    = Math.min(Math.max(toInt(body.limit) || 12, 1), 50);
+    const offset   = Math.max(toInt(body.offset) || 0, 0);
+    const yearFrom = toInt(body.yearFrom);
+    const yearTo   = toInt(body.yearTo);
 
     if (action === 'search') {
       if (!query) return res.status(400).json({ error: 'query required' });

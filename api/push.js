@@ -1,5 +1,5 @@
 // api/push.js — Web Push notifications for GameShelf
-// POST { type: 'friend_request' | 'friend_accept', to: <user_id> }
+// POST { type: 'friend_request' | 'friend_accept' | 'quiz_daily', to: <user_id> }
 // Caller is identified via their Supabase access token (Authorization: Bearer).
 import webpush from 'web-push';
 
@@ -28,6 +28,14 @@ export async function sbFetch(path, opts = {}) {
   const text = await res.text();
   return text ? JSON.parse(text) : null;
 }
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const RULES = {
+  friend_request: (r, me, to) => r.requester_id === me && r.addressee_id === to && r.status === 'pending',
+  friend_accept:  (r, me, to) => r.requester_id === to && r.addressee_id === me && r.status === 'accepted',
+  quiz_daily:     (r) => r.status === 'accepted',
+};
+const RECENT = new Map();
 
 export async function sendToUser(userId, payload) {
   const subs = await sbFetch(`push_subscriptions?user_id=eq.${userId}&select=endpoint,p256dh,auth`);
@@ -67,12 +75,25 @@ export default async function handler(req, res) {
 
     const { type, to } = req.body || {};
     if (!type || !to) return res.status(400).json({ error: 'type and to required' });
+    // « to » est inséré dans les filtres de la base : uniquement un UUID
+    if (!UUID_RE.test(String(to)) || !UUID_RE.test(String(caller.id))) return res.status(400).json({ error: 'Invalid user id' });
+    if (!RULES[type]) return res.status(400).json({ error: 'Unknown type' });
 
-    // Only allow notifying users linked to the caller by a friendship row
+    // Lien requis entre l'appelant et le destinataire, selon le type :
+    // demande d'ami → une demande en attente envoyée par l'appelant ;
+    // acceptation → une amitié acceptée dont l'appelant est le destinataire ;
+    // le reste → une amitié acceptée.
     const fr = await sbFetch(
-      `friendships?or=(and(requester_id.eq.${caller.id},addressee_id.eq.${to}),and(requester_id.eq.${to},addressee_id.eq.${caller.id}))&select=id&limit=1`
+      `friendships?or=(and(requester_id.eq.${caller.id},addressee_id.eq.${to}),and(requester_id.eq.${to},addressee_id.eq.${caller.id}))&select=requester_id,addressee_id,status`
     );
-    if (!fr || !fr.length) return res.status(403).json({ error: 'Not allowed' });
+    if (!(fr || []).some(row => RULES[type](row, caller.id, to))) return res.status(403).json({ error: 'Not allowed' });
+
+    // Anti-rafale (au mieux, par instance) : une même notification au plus une fois par minute
+    const key = `${caller.id}:${type}:${to}`;
+    const now = Date.now();
+    if (RECENT.get(key) > now - 60_000) return res.status(429).json({ error: 'Too many notifications' });
+    RECENT.set(key, now);
+    if (RECENT.size > 5000) RECENT.clear();
 
     const profs = await sbFetch(`profiles?id=eq.${caller.id}&select=username`);
     const name = profs?.[0]?.username || 'Un joueur';

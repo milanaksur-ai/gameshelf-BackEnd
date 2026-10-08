@@ -329,3 +329,71 @@ CREATE POLICY "tier_lists_read_by_visibility" ON tier_lists FOR SELECT USING (
   OR (visibility = 'public' AND public.profile_is_public(user_id))
   OR (visibility IN ('public', 'friends') AND public.is_friend_of(user_id))
 );
+
+-- ── 12. AMITIÉS, BIBLIOTHÈQUES, SCORES DE QUIZ ─────────────────────────────
+-- Audit du 8 octobre 2026 :
+--  - friendships : un joueur pouvait créer une amitié déjà « accepted » avec
+--    n'importe qui, ou accepter lui-même sa demande → contournait le niveau
+--    « Amis » des collections / tier lists et l'accès aux bibliothèques.
+--  - user_games : « Enable read access for all users » USING (true) → toutes les
+--    bibliothèques (comptes privés compris) lisibles sans compte.
+--  - quiz_scores : score modifiable après coup ; lisible sans compte.
+-- Idempotent. Prérequis : sections 6 et 11 (is_friend_of, profile_is_public).
+
+-- Amitiés : on ne crée qu'une demande en attente ; seul le destinataire l'accepte
+DROP POLICY IF EXISTS "Users insert friendships" ON friendships;
+DROP POLICY IF EXISTS "friendships_insert_pending" ON friendships;
+CREATE POLICY "friendships_insert_pending" ON friendships FOR INSERT
+  WITH CHECK (auth.uid() = requester_id AND status = 'pending' AND requester_id <> addressee_id);
+
+DROP POLICY IF EXISTS "Users update own friendships" ON friendships;
+DROP POLICY IF EXISTS "friendships_accept_by_addressee" ON friendships;
+CREATE POLICY "friendships_accept_by_addressee" ON friendships FOR UPDATE
+  USING (auth.uid() = addressee_id) WITH CHECK (auth.uid() = addressee_id);
+
+CREATE OR REPLACE FUNCTION friendships_guard() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.requester_id IS DISTINCT FROM OLD.requester_id
+     OR NEW.addressee_id IS DISTINCT FROM OLD.addressee_id THEN
+    RAISE EXCEPTION 'friendship participants cannot change';
+  END IF;
+  IF NEW.status NOT IN ('pending', 'accepted') THEN
+    RAISE EXCEPTION 'invalid friendship status';
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS friendships_guard ON friendships;
+CREATE TRIGGER friendships_guard BEFORE UPDATE ON friendships
+  FOR EACH ROW EXECUTE FUNCTION friendships_guard();
+
+-- Bibliothèques : soi, ses amis, ou un compte public pour un joueur connecté
+DROP POLICY IF EXISTS "Enable read access for all users" ON user_games;
+DROP POLICY IF EXISTS "Authenticated read user_games" ON user_games;
+DROP POLICY IF EXISTS "Users can read own games" ON user_games;
+DROP POLICY IF EXISTS "user_games_read" ON user_games;
+CREATE POLICY "user_games_read" ON user_games FOR SELECT USING (
+     user_id = auth.uid()
+  OR public.is_friend_of(user_id)
+  OR (auth.uid() IS NOT NULL AND public.profile_is_public(user_id))
+);
+
+-- Scores de quiz : définitifs une fois écrits, lisibles par les joueurs connectés
+DROP POLICY IF EXISTS "quiz_scores_update" ON quiz_scores;
+DROP POLICY IF EXISTS "quiz_scores_select" ON quiz_scores;
+
+-- Vérification
+SELECT tablename, policyname, cmd, qual, with_check FROM pg_policies
+ WHERE schemaname = 'public' AND tablename IN ('friendships', 'user_games', 'quiz_scores')
+ ORDER BY tablename, cmd;
+
+-- ── 13. CATALOGUE GAME PASS (écrit par la tâche Vercel cron-gamepass) ────────
+-- Une seule ligne (id = 1). Aucune règle d'accès : seul le backend (clé de
+-- service) lit et écrit ; l'app passe par /api/gamepass. Idempotent.
+CREATE TABLE IF NOT EXISTS gamepass_catalog (
+  id         INT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+  games      JSONB NOT NULL DEFAULT '[]'::jsonb,
+  new_games  JSONB NOT NULL DEFAULT '[]'::jsonb,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE gamepass_catalog ENABLE ROW LEVEL SECURITY;

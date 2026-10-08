@@ -1,9 +1,25 @@
 {
   "version": 2,
   "crons": [
-    { "path": "/api/cron-weekly", "schedule": "0 18 * * 0" },
-    { "path": "/api/cron-wishlist", "schedule": "0 9 * * *" },
-    { "path": "/api/cron-streak", "schedule": "0 18 * * *" },
-    { "path": "/api/cron-generate-content", "schedule": "0 8 * * *" }
+    {
+      "path": "/api/cron-weekly",
+      "schedule": "0 18 * * 0"
+    },
+    {
+      "path": "/api/cron-wishlist",
+      "schedule": "0 9 * * *"
+    },
+    {
+      "path": "/api/cron-streak",
+      "schedule": "0 18 * * *"
+    },
+    {
+      "path": "/api/cron-generate-content",
+      "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/api/cron-gamepass",
+      "schedule": "17 6 * * *"
+    }
   ]
 }
