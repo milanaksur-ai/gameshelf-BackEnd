@@ -258,3 +258,46 @@ SELECT tablename, policyname, cmd, qual, with_check FROM pg_policies
 -- départager les égalités de note (Top 6 du profil, Top 20, vues des amis).
 -- Lisible avec le profil, modifiable via la policy UPDATE existante des profils.
 ALTER TABLE profiles ADD COLUMN IF NOT EXISTS top_order JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+-- ── 10. FORMATS DES DONNÉES AFFICHÉES CHEZ LES AUTRES JOUEURS ──────────────
+-- Défense en profondeur : l'app échappe désormais tout ce qu'elle affiche, et la
+-- base refuse en plus les valeurs capables de casser le HTML (pseudo, avatar,
+-- dégradé, photo, identifiants de jeu). Sans ces contraintes, n'importe qui peut
+-- écrire ces champs directement via l'API, sans passer par l'app.
+-- NOT VALID : s'applique aux nouvelles écritures sans bloquer sur l'existant ;
+-- la requête de fin liste les lignes existantes hors format. Idempotent.
+
+ALTER TABLE profiles DROP CONSTRAINT IF EXISTS profiles_username_safe;
+ALTER TABLE profiles ADD CONSTRAINT profiles_username_safe CHECK (
+  username IS NULL OR (char_length(username) BETWEEN 1 AND 40
+                       AND username !~ '[<>"`&\\[:cntrl:]]')) NOT VALID;
+
+ALTER TABLE profiles DROP CONSTRAINT IF EXISTS profiles_avatar_safe;
+ALTER TABLE profiles ADD CONSTRAINT profiles_avatar_safe CHECK (
+  avatar IS NULL OR (char_length(avatar) <= 16 AND avatar !~ '[<>"''`&\\[:cntrl:]]')) NOT VALID;
+
+ALTER TABLE profiles DROP CONSTRAINT IF EXISTS profiles_avatar_grad_safe;
+ALTER TABLE profiles ADD CONSTRAINT profiles_avatar_grad_safe CHECK (
+  avatar_grad IS NULL OR (avatar_grad ~ '^(linear|radial|conic)-gradient\([#0-9A-Za-z,.%[:space:]()-]*\)$'
+                          AND avatar_grad !~* 'url[[:space:]]*\(')) NOT VALID;
+
+ALTER TABLE profiles DROP CONSTRAINT IF EXISTS profiles_avatar_url_safe;
+ALTER TABLE profiles ADD CONSTRAINT profiles_avatar_url_safe CHECK (
+  avatar_url IS NULL
+  OR avatar_url ~ '^https://[^[:space:]"''<>`\\]+$'
+  OR avatar_url ~ '^data:image/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$') NOT VALID;
+
+ALTER TABLE user_games DROP CONSTRAINT IF EXISTS user_games_ids_safe;
+ALTER TABLE user_games ADD CONSTRAINT user_games_ids_safe CHECK (
+  game_id ~ '^[A-Za-z0-9_:.-]{1,100}$'
+  AND (image_id IS NULL OR image_id ~ '^[A-Za-z0-9_-]{0,64}$')) NOT VALID;
+
+-- Lignes existantes hors format (à corriger à la main si la liste n'est pas vide)
+SELECT 'profiles' AS t, id::text, username FROM profiles
+ WHERE (username IS NOT NULL AND (char_length(username) NOT BETWEEN 1 AND 40 OR username ~ '[<>"`&\\[:cntrl:]]'))
+    OR (avatar IS NOT NULL AND (char_length(avatar) > 16 OR avatar ~ '[<>"''`&\\[:cntrl:]]'))
+    OR (avatar_grad IS NOT NULL AND (avatar_grad !~ '^(linear|radial|conic)-gradient\([#0-9A-Za-z,.%[:space:]()-]*\)$' OR avatar_grad ~* 'url[[:space:]]*\('))
+    OR (avatar_url IS NOT NULL AND avatar_url !~ '^https://[^[:space:]"''<>`\\]+$' AND avatar_url !~ '^data:image/(png|jpe?g|webp|gif);base64,[A-Za-z0-9+/=]+$')
+UNION ALL
+SELECT 'user_games', user_id::text || ' / ' || game_id, title FROM user_games
+ WHERE game_id !~ '^[A-Za-z0-9_:.-]{1,100}$' OR (image_id IS NOT NULL AND image_id !~ '^[A-Za-z0-9_-]{0,64}$');
