@@ -397,3 +397,271 @@ CREATE TABLE IF NOT EXISTS gamepass_catalog (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE gamepass_catalog ENABLE ROW LEVEL SECURITY;
+
+-- ── 14. XP ET SCORES DE QUIZ CALCULÉS PAR LE SERVEUR ───────────────────────
+-- Avant : l'app décidait des montants et appelait increment_xp(delta), qui
+-- ajoutait n'importe quel nombre ; podium, série et scores de quiz étaient
+-- calculés et écrits par l'app.
+-- Après : chaque gain d'XP passe par une fonction serveur qui le déduit des
+-- données en base, une seule fois (table xp_events), et la colonne xp n'est
+-- plus modifiable depuis l'app. Idempotent. Prérequis : sections 6 et 12.
+
+CREATE TABLE IF NOT EXISTS xp_events (
+  user_id    UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  reason     TEXT NOT NULL,
+  ref        TEXT NOT NULL,
+  amount     INT  NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, reason, ref)
+);
+ALTER TABLE xp_events ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS "xp_events_read_own" ON xp_events;
+CREATE POLICY "xp_events_read_own" ON xp_events FOR SELECT USING (user_id = auth.uid());
+
+-- Catalogue des succès qui rapportent de l'XP (repris de l'app)
+CREATE TABLE IF NOT EXISTS achievement_catalog (
+  id TEXT PRIMARY KEY, kind TEXT NOT NULL, threshold INT NOT NULL, xp INT NOT NULL
+);
+ALTER TABLE achievement_catalog ENABLE ROW LEVEL SECURITY;
+INSERT INTO achievement_catalog (id, kind, threshold, xp) VALUES
+    ('lib_10', 'lib', 10, 30),
+    ('lib_25', 'lib', 25, 50),
+    ('lib_50', 'lib', 50, 100),
+    ('lib_100', 'lib', 100, 160),
+    ('lib_250', 'lib', 250, 280),
+    ('lib_500', 'lib', 500, 450),
+    ('score_5', 'score', 5, 20),
+    ('score_20', 'score', 20, 50),
+    ('score_50', 'score', 50, 110),
+    ('score_100', 'score', 100, 200),
+    ('note_3', 'note', 3, 25),
+    ('note_15', 'note', 15, 70),
+    ('note_50', 'note', 50, 160),
+    ('finish_5', 'finish', 5, 40),
+    ('finish_25', 'finish', 25, 100),
+    ('finish_50', 'finish', 50, 170),
+    ('finish_100', 'finish', 100, 280),
+    ('finish_250', 'finish', 250, 450),
+    ('quiz_1', 'quiz', 1, 15),
+    ('quiz_3', 'quiz', 3, 35),
+    ('quiz_10', 'quiz', 10, 90),
+    ('friend_1', 'friend', 1, 20),
+    ('friend_5', 'friend', 5, 50),
+    ('friend_10', 'friend', 10, 90),
+    ('friend_20', 'friend', 20, 160),
+    ('col_1', 'col', 1, 20),
+    ('col_3', 'col', 3, 50)
+ON CONFLICT (id) DO UPDATE SET kind = EXCLUDED.kind, threshold = EXCLUDED.threshold, xp = EXCLUDED.xp;
+
+-- La colonne xp n'est modifiable que par les fonctions ci-dessous (ou l'admin)
+CREATE OR REPLACE FUNCTION profiles_protect_xp() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF COALESCE(current_setting('gs.xp_write', true), '') = 'on'
+     OR current_user IN ('postgres', 'supabase_admin')
+     OR COALESCE(current_setting('request.jwt.claim.role', true), '') = 'service_role' THEN
+    RETURN NEW;
+  END IF;
+  IF TG_OP = 'INSERT' THEN
+    NEW.xp := 0;
+  ELSIF NEW.xp IS DISTINCT FROM OLD.xp THEN
+    NEW.xp := OLD.xp;  -- ignoré sans erreur : les anciennes versions de l'app continuent de fonctionner
+  END IF;
+  RETURN NEW;
+END $$;
+DROP TRIGGER IF EXISTS profiles_protect_xp ON profiles;
+CREATE TRIGGER profiles_protect_xp BEFORE INSERT OR UPDATE ON profiles
+  FOR EACH ROW EXECUTE FUNCTION profiles_protect_xp();
+
+-- Ajout interne : n'est pas appelable par l'app
+CREATE OR REPLACE FUNCTION _xp_add(uid UUID, p_reason TEXT, p_ref TEXT, amt INT) RETURNS INT
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE n INT;
+BEGIN
+  INSERT INTO xp_events (user_id, reason, ref, amount) VALUES (uid, p_reason, p_ref, amt)
+  ON CONFLICT DO NOTHING;
+  GET DIAGNOSTICS n = ROW_COUNT;
+  IF n = 0 OR amt = 0 THEN RETURN 0; END IF;
+  PERFORM set_config('gs.xp_write', 'on', true);
+  UPDATE profiles SET xp = COALESCE(xp, 0) + amt WHERE id = uid;
+  PERFORM set_config('gs.xp_write', 'off', true);
+  RETURN amt;
+END $$;
+REVOKE ALL ON FUNCTION _xp_add(UUID, TEXT, TEXT, INT) FROM PUBLIC, anon, authenticated;
+
+-- XP par jeu (note 5, vibe 5, avis 15) et par quiz terminé (5), déduite des données.
+-- Plafond : 60 attributions par type sur 24 h glissantes (anti-farm de faux jeux).
+CREATE OR REPLACE FUNCTION sync_xp() RETURNS INT
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE uid UUID := auth.uid(); r RECORD; total INT; cap CONSTANT INT := 60;
+BEGIN
+  IF uid IS NULL THEN RAISE EXCEPTION 'not signed in'; END IF;
+  FOR r IN
+    SELECT 'score' AS reason, game_id AS ref, 5 AS amt FROM user_games
+     WHERE user_id = uid AND COALESCE(score, 0) > 0
+    UNION ALL
+    SELECT 'vibe', game_id, 5 FROM user_games
+     WHERE user_id = uid AND vibe IS NOT NULL AND vibe::text NOT IN ('', '[]', 'null', '""', '{}')
+    UNION ALL
+    SELECT 'note', game_id, 15 FROM user_games
+     WHERE user_id = uid AND COALESCE(btrim(notes), '') <> ''
+    UNION ALL
+    SELECT DISTINCT 'quiz', quiz_id, 5 FROM quiz_scores WHERE user_id = uid
+  LOOP
+    CONTINUE WHEN EXISTS (SELECT 1 FROM xp_events e WHERE e.user_id = uid AND e.reason = r.reason AND e.ref = r.ref);
+    CONTINUE WHEN (SELECT count(*) FROM xp_events e WHERE e.user_id = uid AND e.reason = r.reason
+                     AND e.amount > 0 AND e.created_at > now() - interval '24 hours') >= cap;
+    PERFORM _xp_add(uid, r.reason, r.ref, r.amt);
+  END LOOP;
+  SELECT xp INTO total FROM profiles WHERE id = uid;
+  RETURN COALESCE(total, 0);
+END $$;
+
+-- Succès : payé une seule fois, et seulement si la condition est vraie en base
+CREATE OR REPLACE FUNCTION award_achievement(p_ach TEXT) RETURNS INT
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE uid UUID := auth.uid(); a achievement_catalog; cnt INT; total INT;
+BEGIN
+  IF uid IS NULL THEN RAISE EXCEPTION 'not signed in'; END IF;
+  SELECT * INTO a FROM achievement_catalog WHERE id = p_ach;
+  IF FOUND THEN
+    cnt := CASE a.kind
+      WHEN 'lib'    THEN (SELECT count(*) FROM user_games WHERE user_id = uid)
+      WHEN 'score'  THEN (SELECT count(*) FROM user_games WHERE user_id = uid AND COALESCE(score, 0) > 0)
+      WHEN 'note'   THEN (SELECT count(*) FROM user_games WHERE user_id = uid AND COALESCE(btrim(notes), '') <> '')
+      WHEN 'finish' THEN (SELECT count(*) FROM user_games WHERE user_id = uid AND status IN ('finished', 'platine'))
+      WHEN 'quiz'   THEN (SELECT count(DISTINCT quiz_id) FROM quiz_scores WHERE user_id = uid)
+      WHEN 'friend' THEN (SELECT count(*) FROM friendships WHERE status = 'accepted' AND (requester_id = uid OR addressee_id = uid))
+      WHEN 'col'    THEN (SELECT count(*) FROM collections WHERE user_id = uid)
+      ELSE 0 END;
+    IF cnt >= a.threshold THEN PERFORM _xp_add(uid, 'achievement', a.id, a.xp); END IF;
+  END IF;
+  SELECT xp INTO total FROM profiles WHERE id = uid;
+  RETURN COALESCE(total, 0);
+END $$;
+
+-- Podium du quiz d'hier (parmi soi et ses amis) + série de 7 jours complets.
+-- Jour = jour UTC, comme dans l'app ; un jour « complet » = 4 quiz différents.
+CREATE OR REPLACE FUNCTION claim_quiz_rewards() RETURNS JSONB
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  uid UUID := auth.uid();
+  today INT := floor(extract(epoch FROM now()) / 86400)::INT;
+  yday INT := today - 1;
+  mine INT; n INT; rnk INT; amt INT; rank_xp INT := 0; streak_xp INT := 0; d INT; ok BOOLEAN; total INT;
+BEGIN
+  IF uid IS NULL THEN RAISE EXCEPTION 'not signed in'; END IF;
+
+  SELECT sum(score) INTO mine FROM quiz_scores WHERE user_id = uid AND day_index = yday;
+  IF mine IS NOT NULL THEN
+    WITH circle AS (
+      SELECT uid AS id
+      UNION SELECT CASE WHEN requester_id = uid THEN addressee_id ELSE requester_id END
+        FROM friendships WHERE status = 'accepted' AND (requester_id = uid OR addressee_id = uid)
+    ), totals AS (
+      SELECT q.user_id, sum(q.score) AS pts FROM quiz_scores q JOIN circle c ON c.id = q.user_id
+       WHERE q.day_index = yday GROUP BY q.user_id
+    )
+    SELECT count(*), 1 + count(*) FILTER (WHERE pts > mine) INTO n, rnk FROM totals;
+    amt := CASE WHEN n >= 2 AND rnk <= 3 THEN (ARRAY[150, 50, 25])[rnk] ELSE 5 END;
+    rank_xp := _xp_add(uid, 'quiz_rank', yday::TEXT, amt);
+  END IF;
+
+  -- Série : 7 jours complets consécutifs se terminant aujourd'hui ou hier,
+  -- sans chevaucher une série déjà payée
+  FOREACH d IN ARRAY ARRAY[today, yday] LOOP
+    SELECT bool_and(c >= 4) AND count(*) = 7 INTO ok FROM (
+      SELECT g AS day, (SELECT count(DISTINCT quiz_id) FROM quiz_scores
+                         WHERE user_id = uid AND day_index = g) AS c
+        FROM generate_series(d - 6, d) g) s;
+    IF ok AND NOT EXISTS (SELECT 1 FROM xp_events WHERE user_id = uid AND reason = 'quiz_streak'
+                            AND ref ~ '^[0-9]+$' AND ref::INT BETWEEN d - 6 AND d) THEN
+      streak_xp := streak_xp + _xp_add(uid, 'quiz_streak', d::TEXT, 100);
+    END IF;
+  END LOOP;
+
+  SELECT xp INTO total FROM profiles WHERE id = uid;
+  RETURN jsonb_build_object('rank', rnk, 'participants', COALESCE(n, 0), 'rank_xp', rank_xp,
+                            'streak_xp', streak_xp, 'xp', COALESCE(total, 0));
+END $$;
+
+DROP FUNCTION IF EXISTS submit_quiz_score(TEXT, BOOLEAN[]);
+-- Score de quiz : calculé à partir des réponses, pour le jour courant, une seule fois.
+-- (La colonne answers peut être jsonb ou boolean[] selon l'historique de la base.)
+DO $do$
+DECLARE t TEXT;
+BEGIN
+  SELECT data_type INTO t FROM information_schema.columns
+   WHERE table_schema = 'public' AND table_name = 'quiz_scores' AND column_name = 'answers';
+  EXECUTE format($f$
+    CREATE OR REPLACE FUNCTION submit_quiz_score(p_quiz_id TEXT, p_answers BOOLEAN[], p_day INT DEFAULT NULL) RETURNS INT
+    LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $b$
+    DECLARE uid UUID := auth.uid(); s INT; n INT := COALESCE(array_length(p_answers, 1), 0);
+            today INT := floor(extract(epoch FROM now()) / 86400)::INT; d INT := COALESCE(p_day, today);
+    BEGIN
+      IF uid IS NULL THEN RAISE EXCEPTION 'not signed in'; END IF;
+      IF p_quiz_id !~ '^[A-Za-z0-9_-]{1,64}$' OR n NOT BETWEEN 1 AND 30 THEN RAISE EXCEPTION 'invalid quiz'; END IF;
+      -- aujourd'hui, ou hier pour un quiz mis en pause puis finalisé au lancement suivant
+      IF d NOT BETWEEN today - 1 AND today THEN RAISE EXCEPTION 'invalid day'; END IF;
+      SELECT count(*) INTO s FROM unnest(p_answers) a WHERE a;
+      INSERT INTO quiz_scores (user_id, quiz_id, score, total, day_index, answers)
+      VALUES (uid, p_quiz_id, s, n, d, %s)
+      ON CONFLICT (user_id, quiz_id, day_index) DO NOTHING;
+      -- score réellement enregistré (le premier du jour), pas celui de cette tentative
+      SELECT score INTO s FROM quiz_scores
+       WHERE user_id = uid AND quiz_id = p_quiz_id AND day_index = d;
+      RETURN s;
+    END $b$;$f$,
+    CASE WHEN t IN ('json', 'jsonb') THEN 'to_jsonb(p_answers)' ELSE 'p_answers' END);
+END $do$;
+
+-- Plus aucune écriture directe des scores par l'app
+DROP POLICY IF EXISTS "quiz_scores_insert" ON quiz_scores;
+DROP POLICY IF EXISTS "Users insert quiz_scores" ON quiz_scores;
+
+-- Fonctions appelables par les joueurs connectés uniquement
+REVOKE ALL ON FUNCTION sync_xp() FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION award_achievement(TEXT) FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION claim_quiz_rewards() FROM PUBLIC, anon;
+REVOKE ALL ON FUNCTION submit_quiz_score(TEXT, BOOLEAN[], INT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION sync_xp() TO authenticated;
+GRANT EXECUTE ON FUNCTION award_achievement(TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION claim_quiz_rewards() TO authenticated;
+GRANT EXECUTE ON FUNCTION submit_quiz_score(TEXT, BOOLEAN[], INT) TO authenticated;
+
+-- L'ancienne fonction qui ajoutait un montant libre disparaît
+DO $do$
+DECLARE f RECORD;
+BEGIN
+  FOR f IN SELECT p.oid::regprocedure AS sig FROM pg_proc p JOIN pg_namespace ns ON ns.oid = p.pronamespace
+            WHERE ns.nspname = 'public' AND p.proname = 'increment_xp'
+  LOOP EXECUTE format('DROP FUNCTION %s', f.sig); END LOOP;
+END $do$;
+
+-- Reprise de l'existant : ce qui a déjà été payé est marqué (montant 0) pour ne
+-- jamais l'être deux fois. Joueurs dont la reprise d'XP a déjà tourné
+-- (xp_backfilled) : jeux notés / vibes / avis / quiz. Tous : succès, podiums et
+-- séries déjà enregistrés dans profiles.achievements.
+INSERT INTO xp_events (user_id, reason, ref, amount)
+SELECT ug.user_id, x.reason, ug.game_id, 0 FROM user_games ug
+  JOIN profiles p ON p.id = ug.user_id AND COALESCE(p.xp_backfilled, FALSE)
+  CROSS JOIN LATERAL (VALUES
+    ('score', COALESCE(ug.score, 0) > 0),
+    ('vibe',  ug.vibe IS NOT NULL AND ug.vibe::text NOT IN ('', '[]', 'null', '""', '{}')),
+    ('note',  COALESCE(btrim(ug.notes), '') <> '')) AS x(reason, ok)
+ WHERE x.ok
+ON CONFLICT DO NOTHING;
+
+INSERT INTO xp_events (user_id, reason, ref, amount)
+SELECT DISTINCT q.user_id, 'quiz', q.quiz_id, 0 FROM quiz_scores q
+  JOIN profiles p ON p.id = q.user_id AND COALESCE(p.xp_backfilled, FALSE)
+ON CONFLICT DO NOTHING;
+
+INSERT INTO xp_events (user_id, reason, ref, amount)
+SELECT p.id,
+       CASE WHEN k LIKE 'xp_qrank_%' THEN 'quiz_rank' WHEN k LIKE 'xp_qstreak_%' THEN 'quiz_streak' ELSE 'achievement' END,
+       CASE WHEN k LIKE 'xp_q%' THEN regexp_replace(k, '^xp_q(rank|streak)_', '') ELSE k END,
+       0
+  FROM profiles p, jsonb_array_elements_text(COALESCE(to_jsonb(p.achievements), '[]'::jsonb)) AS k
+ WHERE k ~ '^xp_q(rank|streak)_[0-9]+$' OR k IN (SELECT id FROM achievement_catalog)
+ON CONFLICT DO NOTHING;
