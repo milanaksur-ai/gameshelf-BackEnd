@@ -8,6 +8,9 @@ const SIGLS = [
   'fdd9e2a7-0fee-49f6-ad69-4354098401ff',
   'b8900d09-a491-44cc-916e-32b5acae621b',
 ];
+// Liste Microsoft des jeux qui quittent bientôt le Game Pass (identifiant utilisé
+// par les outils communautaires ; une liste vide ou en erreur n'interrompt rien)
+const LEAVING_SIGL = '393f05bf-e596-4ef6-9487-6d4fa0eab987';
 // État initial si la table est vide : le dernier catalogue publié par l'ancien workflow
 const LEGACY_URL = 'https://gameshelf-seven.vercel.app/gamepass.json';
 
@@ -67,6 +70,26 @@ export async function buildCatalog(previous) {
   return { games, newGames, freshCount: fresh.length };
 }
 
+// Jeux qui quittent bientôt le service, enrichis (titre, image) à partir du catalogue
+export async function buildLeaving(games) {
+  const list = await getJson(`https://catalog.gamepass.com/sigls/v2?id=${LEAVING_SIGL}&language=en-US&market=US`);
+  const byId = Object.fromEntries((games || []).map(g => [g.id, g]));
+  const ids = [...new Set(list.slice(1).map(i => i.id).filter(Boolean))].slice(0, 40);
+  const missing = ids.filter(id => !byId[id]);
+  for (let i = 0; i < missing.length; i += 20) {
+    const data = await getJson(
+      `https://displaycatalog.mp.microsoft.com/v7.0/products?bigIds=${missing.slice(i, i + 20).join(',')}&market=US&languages=en-US`);
+    for (const prod of data.Products || []) {
+      const loc = prod.LocalizedProperties?.[0];
+      if (!loc?.ProductTitle) continue;
+      const imgObj = loc.Images?.find(im => ['BoxArt', 'Poster'].includes(im.ImagePurpose));
+      byId[prod.ProductId] = { id: prod.ProductId, title: cleanTitle(loc.ProductTitle),
+        img: imgObj?.Uri ? (imgObj.Uri.startsWith('//') ? 'https:' + imgObj.Uri : imgObj.Uri) : null };
+    }
+  }
+  return ids.map(id => byId[id]).filter(Boolean).map(g => ({ id: g.id, title: g.title, img: g.img }));
+}
+
 export default async function handler(req, res) {
   // Refus par défaut : sans secret configuré, la tâche n'est pas exposée
   if (!process.env.CRON_SECRET || req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
@@ -78,12 +101,17 @@ export default async function handler(req, res) {
     if (!previous) { try { previous = await getJson(LEGACY_URL); } catch (e) { previous = null; } }
 
     const { games, newGames, freshCount } = await buildCatalog(previous);
+    let leaving = null;
+    try { leaving = await buildLeaving(games); } catch (e) { console.warn('leaving list unavailable', e.message); }
+    const row = { id: 1, games, new_games: newGames, updated_at: new Date().toISOString() };
+    if (leaving) row.leaving = leaving; // en cas d'échec, on garde la liste précédente
     await sbFetch('gamepass_catalog?on_conflict=id', {
       method: 'POST',
       headers: { Prefer: 'resolution=merge-duplicates,return=minimal' },
-      body: JSON.stringify({ id: 1, games, new_games: newGames, updated_at: new Date().toISOString() }),
+      body: JSON.stringify(row),
     });
-    return res.status(200).json({ games: games.length, fresh: freshCount, newGames: newGames.length });
+    return res.status(200).json({ games: games.length, fresh: freshCount, newGames: newGames.length,
+                                  leaving: leaving ? leaving.length : 'indisponible' });
   } catch (e) {
     console.error('cron-gamepass error', e);
     return res.status(500).json({ error: e.message });

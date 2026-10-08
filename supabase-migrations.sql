@@ -665,3 +665,76 @@ SELECT p.id,
   FROM profiles p, jsonb_array_elements_text(COALESCE(to_jsonb(p.achievements), '[]'::jsonb)) AS k
  WHERE k ~ '^xp_q(rank|streak)_[0-9]+$' OR k IN (SELECT id FROM achievement_catalog)
 ON CONFLICT DO NOTHING;
+
+-- ── 15. RÉACTIONS, ABONNEMENTS, PROFILS PUBLICS, GAME PASS « QUITTE BIENTÔT » ──
+-- Idempotent. Prérequis : sections 6, 11, 12, 13.
+
+-- Abonnements : suivre un compte public sans amitié réciproque
+CREATE TABLE IF NOT EXISTS follows (
+  follower_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  followee_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (follower_id, followee_id),
+  CHECK (follower_id <> followee_id)
+);
+ALTER TABLE follows ENABLE ROW LEVEL SECURITY;
+CREATE INDEX IF NOT EXISTS follows_followee_idx ON follows (followee_id);
+
+CREATE OR REPLACE FUNCTION public.is_following(other UUID) RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT auth.uid() IS NOT NULL AND EXISTS (
+    SELECT 1 FROM follows WHERE follower_id = auth.uid() AND followee_id = other);
+$$;
+REVOKE ALL ON FUNCTION public.is_following(UUID) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.is_following(UUID) TO anon, authenticated;
+
+DROP POLICY IF EXISTS "follows_read" ON follows;
+CREATE POLICY "follows_read" ON follows FOR SELECT USING (
+  follower_id = auth.uid() OR followee_id = auth.uid() OR public.profile_is_public(followee_id));
+DROP POLICY IF EXISTS "follows_insert_own" ON follows;
+CREATE POLICY "follows_insert_own" ON follows FOR INSERT
+  WITH CHECK (follower_id = auth.uid() AND public.profile_is_public(followee_id));
+DROP POLICY IF EXISTS "follows_delete_own" ON follows;
+CREATE POLICY "follows_delete_own" ON follows FOR DELETE USING (follower_id = auth.uid());
+
+-- Réactions à l'avis d'un joueur sur un jeu (une par personne, modifiable)
+CREATE TABLE IF NOT EXISTS game_reactions (
+  reactor_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  owner_id   UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+  game_id    TEXT NOT NULL CHECK (game_id ~ '^[A-Za-z0-9_:.-]{1,100}$'),
+  reaction   TEXT NOT NULL CHECK (reaction IN ('agree', 'disagree', 'want', 'gg')),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (reactor_id, owner_id, game_id),
+  CHECK (reactor_id <> owner_id)
+);
+ALTER TABLE game_reactions ENABLE ROW LEVEL SECURITY;
+CREATE INDEX IF NOT EXISTS game_reactions_owner_idx ON game_reactions (owner_id, game_id);
+
+-- Visible par l'auteur, le propriétaire, ses amis et ses abonnés
+DROP POLICY IF EXISTS "reactions_read" ON game_reactions;
+CREATE POLICY "reactions_read" ON game_reactions FOR SELECT USING (
+     reactor_id = auth.uid() OR owner_id = auth.uid()
+  OR public.is_friend_of(owner_id) OR public.is_following(owner_id));
+-- On ne réagit qu'à un jeu réellement présent chez un ami (ou un compte public suivi)
+DROP POLICY IF EXISTS "reactions_write_own" ON game_reactions;
+CREATE POLICY "reactions_write_own" ON game_reactions FOR INSERT WITH CHECK (
+  reactor_id = auth.uid()
+  AND (public.is_friend_of(owner_id) OR (public.is_following(owner_id) AND public.profile_is_public(owner_id)))
+  AND EXISTS (SELECT 1 FROM user_games ug WHERE ug.user_id = owner_id AND ug.game_id = game_reactions.game_id));
+DROP POLICY IF EXISTS "reactions_update_own" ON game_reactions;
+CREATE POLICY "reactions_update_own" ON game_reactions FOR UPDATE
+  USING (reactor_id = auth.uid()) WITH CHECK (reactor_id = auth.uid());
+DROP POLICY IF EXISTS "reactions_delete_own" ON game_reactions;
+CREATE POLICY "reactions_delete_own" ON game_reactions FOR DELETE USING (reactor_id = auth.uid());
+
+-- Profils publics partageables (/u/pseudo) : la bibliothèque d'un compte public
+-- devient lisible sans compte. Les comptes privés restent limités à leurs amis.
+DROP POLICY IF EXISTS "user_games_read" ON user_games;
+CREATE POLICY "user_games_read" ON user_games FOR SELECT USING (
+     user_id = auth.uid()
+  OR public.is_friend_of(user_id)
+  OR public.profile_is_public(user_id)
+);
+
+-- Game Pass : jeux qui quittent bientôt le service
+ALTER TABLE gamepass_catalog ADD COLUMN IF NOT EXISTS leaving JSONB NOT NULL DEFAULT '[]'::jsonb;

@@ -10,11 +10,11 @@ export default async function handler(req, res) {
   if (req.method === 'OPTIONS') return res.status(200).end();
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
   try {
-    const rows = await sbFetch('gamepass_catalog?id=eq.1&select=games,new_games,updated_at');
+    const rows = await sbFetch('gamepass_catalog?id=eq.1&select=games,new_games,leaving,updated_at');
     const row = rows?.[0];
     if (!row) return res.status(404).json({ error: 'Catalog not ready' });
     res.setHeader('Cache-Control', 'public, s-maxage=3600, stale-while-revalidate=86400');
-    return res.status(200).json({ games: row.games, newGames: row.new_games, updatedAt: row.updated_at });
+    return res.status(200).json({ games: row.games, newGames: row.new_games, leaving: row.leaving || [], updatedAt: row.updated_at });
   } catch (e) {
     console.error('gamepass error', e);
     return res.status(500).json({ error: 'Catalog unavailable' });

@@ -1,5 +1,5 @@
 // api/push.js — Web Push notifications for GameShelf
-// POST { type: 'friend_request' | 'friend_accept' | 'quiz_daily', to: <user_id> }
+// POST { type: 'friend_request' | 'friend_accept' | 'quiz_daily' | 'reaction', to: <user_id>, reaction?, gameTitle? }
 // Caller is identified via their Supabase access token (Authorization: Bearer).
 import webpush from 'web-push';
 
@@ -34,6 +34,14 @@ const RULES = {
   friend_request: (r, me, to) => r.requester_id === me && r.addressee_id === to && r.status === 'pending',
   friend_accept:  (r, me, to) => r.requester_id === to && r.addressee_id === me && r.status === 'accepted',
   quiz_daily:     (r) => r.status === 'accepted',
+  reaction:       (r) => r.status === 'accepted',
+};
+// Réactions : libellé côté serveur, le titre du jeu vient de l'app (texte brut, tronqué)
+const REACTION_LABEL = {
+  agree:    ['👍', 'est du même avis que toi sur'],
+  disagree: ['🤨', "n'est pas d'accord avec toi sur"],
+  want:     ['🎯', 'a envie de jouer à'],
+  gg:       ['🏆', 'te félicite pour'],
 };
 const RECENT = new Map();
 
@@ -73,11 +81,12 @@ export default async function handler(req, res) {
     if (!uRes.ok) return res.status(401).json({ error: 'Invalid token' });
     const caller = await uRes.json();
 
-    const { type, to } = req.body || {};
+    const { type, to, reaction, gameTitle } = req.body || {};
     if (!type || !to) return res.status(400).json({ error: 'type and to required' });
     // « to » est inséré dans les filtres de la base : uniquement un UUID
     if (!UUID_RE.test(String(to)) || !UUID_RE.test(String(caller.id))) return res.status(400).json({ error: 'Invalid user id' });
     if (!RULES[type]) return res.status(400).json({ error: 'Unknown type' });
+    if (type === 'reaction' && !REACTION_LABEL[reaction]) return res.status(400).json({ error: 'Unknown reaction' });
 
     // Lien requis entre l'appelant et le destinataire, selon le type :
     // demande d'ami → une demande en attente envoyée par l'appelant ;
@@ -105,6 +114,13 @@ export default async function handler(req, res) {
       // la notification au lieu de l'empiler (max 1 visible par jour)
       quiz_daily:     { title: 'GameShelf', body: `🧠 ${name} a lancé les quiz du jour — à toi de jouer !`, tag: 'quiz-daily', url: '/' },
     };
+    if (type === 'reaction') {
+      const lbl = REACTION_LABEL[reaction];
+      if (!lbl) return res.status(400).json({ error: 'Unknown reaction' });
+      const title = String(gameTitle || 'ton jeu').replace(/[\u0000-\u001f]/g, ' ').slice(0, 60);
+      // tag : les réactions suivantes remplacent la notification au lieu de s'empiler
+      MESSAGES.reaction = { title: 'GameShelf', body: `${lbl[0]} ${name} ${lbl[1]} ${title}`, tag: 'reactions', url: '/' };
+    }
     const msg = MESSAGES[type];
     if (!msg) return res.status(400).json({ error: 'Unknown type' });
 
