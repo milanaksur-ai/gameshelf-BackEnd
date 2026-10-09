@@ -738,3 +738,24 @@ CREATE POLICY "user_games_read" ON user_games FOR SELECT USING (
 
 -- Game Pass : jeux qui quittent bientôt le service
 ALTER TABLE gamepass_catalog ADD COLUMN IF NOT EXISTS leaving JSONB NOT NULL DEFAULT '[]'::jsonb;
+
+-- ── 16. RÉCAP DU MOIS VISIBLE PAR LES AMIS ──────────────────────────────────
+-- Le détail des gains d'XP reste privé (xp_events) ; un ami n'obtient que les
+-- totaux d'un mois et les succès débloqués. Idempotent. Prérequis : sections 6 et 14.
+CREATE OR REPLACE FUNCTION public.recap_xp(p_user UUID, p_start TIMESTAMPTZ, p_end TIMESTAMPTZ)
+RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF auth.uid() IS NULL OR (p_user <> auth.uid() AND NOT public.is_friend_of(p_user)) THEN
+    RAISE EXCEPTION 'not allowed';
+  END IF;
+  RETURN jsonb_build_object(
+    'xp', COALESCE((SELECT sum(amount) FROM xp_events
+                     WHERE user_id = p_user AND created_at >= p_start AND created_at < p_end), 0),
+    'after', COALESCE((SELECT sum(amount) FROM xp_events
+                        WHERE user_id = p_user AND created_at >= p_end), 0),
+    'achievements', COALESCE((SELECT jsonb_agg(ref) FROM xp_events
+                               WHERE user_id = p_user AND reason = 'achievement' AND amount > 0
+                                 AND created_at >= p_start AND created_at < p_end), '[]'::jsonb));
+END $$;
+REVOKE ALL ON FUNCTION public.recap_xp(UUID, TIMESTAMPTZ, TIMESTAMPTZ) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.recap_xp(UUID, TIMESTAMPTZ, TIMESTAMPTZ) TO authenticated;
