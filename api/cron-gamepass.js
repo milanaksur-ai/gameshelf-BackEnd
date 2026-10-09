@@ -10,7 +10,8 @@ const SIGLS = [
 ];
 // Liste Microsoft des jeux qui quittent bientôt le Game Pass (identifiant utilisé
 // par les outils communautaires ; une liste vide ou en erreur n'interrompt rien)
-const LEAVING_SIGL = '393f05bf-e596-4ef6-9487-6d4fa0eab987';
+// « Quitte bientôt » : listes console et PC (identifiants non documentés par Microsoft)
+const LEAVING_SIGLS = ['393f05bf-e596-4ef6-9487-6d4fa0eab987', 'cc7fc951-d00f-410e-9e02-5e4628e04163'];
 // État initial si la table est vide : le dernier catalogue publié par l'ancien workflow
 const LEGACY_URL = 'https://gameshelf-seven.vercel.app/gamepass.json';
 
@@ -72,9 +73,11 @@ export async function buildCatalog(previous) {
 
 // Jeux qui quittent bientôt le service, enrichis (titre, image) à partir du catalogue
 export async function buildLeaving(games) {
-  const list = await getJson(`https://catalog.gamepass.com/sigls/v2?id=${LEAVING_SIGL}&language=en-US&market=US`);
+  const lists = await Promise.all(LEAVING_SIGLS.map(id =>
+    getJson(`https://catalog.gamepass.com/sigls/v2?id=${id}&language=en-US&market=US`).catch(() => null)));
+  if (lists.every(l => !Array.isArray(l))) throw new Error('leaving lists unavailable');
   const byId = Object.fromEntries((games || []).map(g => [g.id, g]));
-  const ids = [...new Set(list.slice(1).map(i => i.id).filter(Boolean))].slice(0, 40);
+  const ids = [...new Set(lists.filter(Array.isArray).flatMap(l => l.slice(1)).map(i => i.id).filter(Boolean))].slice(0, 40);
   const missing = ids.filter(id => !byId[id]);
   for (let i = 0; i < missing.length; i += 20) {
     const data = await getJson(
