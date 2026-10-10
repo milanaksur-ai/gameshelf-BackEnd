@@ -759,3 +759,39 @@ BEGIN
 END $$;
 REVOKE ALL ON FUNCTION public.recap_xp(UUID, TIMESTAMPTZ, TIMESTAMPTZ) FROM PUBLIC, anon;
 GRANT EXECUTE ON FUNCTION public.recap_xp(UUID, TIMESTAMPTZ, TIMESTAMPTZ) TO authenticated;
+
+-- ── 17. PAQUET DU JOUR : 2 LOOTS D'XP TIRÉS PAR LE SERVEUR ──────────────────
+-- Un paquet par jour et par compte. Le serveur tire les montants (5/10/15/20 XP,
+-- 45/30/18/7 %), les enregistre et renvoie toujours le même résultat si on
+-- rouvre. Le jour est l'indice UTC (jours depuis 1970), comme pour les quiz.
+-- Idempotent. Prérequis : section 14.
+CREATE OR REPLACE FUNCTION public._pack_roll() RETURNS INT LANGUAGE sql VOLATILE AS $$
+  SELECT CASE WHEN r < 0.45 THEN 5 WHEN r < 0.75 THEN 10 WHEN r < 0.93 THEN 15 ELSE 20 END
+    FROM (SELECT random() AS r) x;
+$$;
+REVOKE ALL ON FUNCTION public._pack_roll() FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION public.open_daily_pack(p_day INT)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  uid UUID := auth.uid();
+  today INT := floor(extract(epoch FROM now()) / 86400)::INT;
+  a INT; b INT; was_open BOOLEAN;
+BEGIN
+  IF uid IS NULL THEN RAISE EXCEPTION 'not authenticated'; END IF;
+  -- Aujourd'hui, ou hier (paquet ouvert juste après minuit UTC sur un écran resté ouvert)
+  IF p_day IS NULL OR p_day < today - 1 OR p_day > today THEN RAISE EXCEPTION 'invalid day'; END IF;
+  was_open := EXISTS (SELECT 1 FROM xp_events WHERE user_id = uid AND reason = 'pack' AND ref = p_day || ':1');
+  IF NOT was_open THEN
+    PERFORM _xp_add(uid, 'pack', p_day || ':1', _pack_roll());
+    PERFORM _xp_add(uid, 'pack', p_day || ':2', _pack_roll());
+  END IF;
+  -- Toujours les montants réellement enregistrés (deux appels simultanés → même résultat)
+  SELECT amount INTO a FROM xp_events WHERE user_id = uid AND reason = 'pack' AND ref = p_day || ':1';
+  SELECT amount INTO b FROM xp_events WHERE user_id = uid AND reason = 'pack' AND ref = p_day || ':2';
+  RETURN jsonb_build_object('xp', jsonb_build_array(COALESCE(a, 0), COALESCE(b, 0)),
+                            'already', was_open,
+                            'total', (SELECT xp FROM profiles WHERE id = uid));
+END $$;
+REVOKE ALL ON FUNCTION public.open_daily_pack(INT) FROM PUBLIC, anon;
+GRANT EXECUTE ON FUNCTION public.open_daily_pack(INT) TO authenticated;
